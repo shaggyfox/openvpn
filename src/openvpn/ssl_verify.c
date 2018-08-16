@@ -1206,7 +1206,25 @@ verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up,
 #endif
 
         /* call command */
-        retval = plugin_call(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, NULL, session->opt->es);
+        plugin_return_init(&pr)
+
+        retval = plugin_call (session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, &pr, session->opt->es);
+
+        do{
+ 	    int i;
+            struct openvpn_plugin_string_list* l;
+            for(i=0;i<pr.n;++i){
+                for( l = pr.list[i]; l; l=l->next){
+                    if(!strcmp(l->name,"framedip")){
+                        strncpy(session->framedip,l->value,sizeof(session->framedip));
+                        l=NULL;
+                        break;
+                    }
+                }
+            }
+        }while(0);
+
+        plugin_return_free(&pr);
 
 #ifdef PLUGIN_DEF_AUTH
         /* purge auth control filename (and file itself) for non-deferred returns */
@@ -1246,6 +1264,7 @@ verify_user_pass_management(struct tls_session *session, const struct user_pass 
 {
     int retval = KMDA_ERROR;
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
+  struct plugin_return pr;
 
     /* Is username defined? */
     if ((session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL) || strlen(up->username))

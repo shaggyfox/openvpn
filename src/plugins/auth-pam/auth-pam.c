@@ -119,6 +119,7 @@ struct user_pass {
 
     const struct name_value_list *name_value_list;
     char state_id[128];
+    char framedip[128];
     int passwd_cnt;
     int fd;
 };
@@ -522,7 +523,7 @@ error:
 }
 
 OPENVPN_EXPORT int
-openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const char *argv[], const char *envp[])
+openvpn_plugin_func_v2(openvpn_plugin_handle_t handle, const int type, const char *argv[], const char *envp[], void* per_client_ctx, struct openvpn_plugin_string_list** return_list)
 {
     struct auth_pam_context *context = (struct auth_pam_context *) handle;
 
@@ -533,6 +534,7 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
         const char *password = get_env("password", envp);
         const char *common_name = get_env("common_name", envp) ? get_env("common_name", envp) : "";
         const char *state_id = get_env("state_id", envp);
+        char framedip[128];
 
         if (!state_id)
         {
@@ -554,7 +556,15 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
                 const int status = recv_control(context->foreground_fd);
                 if (status == RESPONSE_VERIFY_SUCCEEDED)
                 {
+                    /* may receive FramedIP */
+		    recv_string(context->foreground_fd,framedip,sizeof(framedip));
+		    if(*framedip){
+		        (*return_list) = calloc(1,sizeof(**return_list));
+		        (*return_list)->name = strdup("framedip");
+		        (*return_list)->value = strdup(framedip);
+		    }
                     return OPENVPN_PLUGIN_FUNC_SUCCESS;
+
                 }
                 if (status == RESPONSE_VERIFY_CHALLENGE)
                 {
@@ -763,9 +773,14 @@ my_conv(int n, const struct pam_message **msg_array,
                     break;
 
                 case PAM_ERROR_MSG:
+	      break;
+	    
                 case PAM_TEXT_INFO:
+	      /* check if value is an IP(v4) addr XXX */
+	      /* if so ... set return value */
+	      strncpy(up->framedip,msg->msg,sizeof(up->framedip)-1);
                     break;
-
+	    
                 default:
                     ret = PAM_CONV_ERR;
                     break;
@@ -821,6 +836,11 @@ pam_auth_bg(const char *service, const struct user_pass *up)
 
         /* Close PAM */
         pam_end(pamh, status);
+    }
+    send_control(up->fd, ret);
+    if(ret == RESPONSE_VERIFY_SUCCEEDED){
+        /* append (optional) framedip */
+        send_string(up->fd,up->framedip);
     }
 }
 
@@ -912,6 +932,10 @@ static int pam_auth(const char* service, struct user_pass* up)
         case RESPONSE_VERIFY_FAILED:
         case RESPONSE_VERIFY_SUCCEEDED:
           fprintf(stderr,"AUTH-PAM: BACKGROUND: received auth result\n");
+	if(ret == RESPONSE_VERIFY_SUCCEEDED){
+	  /* read 'optional' ip-addr from background process */
+	  recv_string(my_fd,up->framedip,sizeof(up->framedip));
+	}
           close(my_fd);
           waitpid(pid,&status,0);
           break;
@@ -982,6 +1006,7 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
      */
     while (1)
     {
+        int auth_result;
         memset(&up, 0, sizeof(up));
         up.verb = verb;
         up.name_value_list = name_value_list;
@@ -1020,9 +1045,13 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
                 /* If password is of the form SCRV1:base64:base64 split it up */
                 split_scrv1_password(&up);
 
-                if (send_control (fd, pam_auth(service, &up)) == -1)
+                if (send_control (fd, (auth_result = pam_auth(service, &up))) == -1)
                 {
                   fprintf(stderr, "AUTH-PAM: BACKGROUND: write error on response socket\n");
+                }
+                /* check for result ... if success send also up->framedip */
+                if(auth_result == RESPONSE_VERIFY_SUCCEEDED){
+                    send_string(fd,up.framedip);
                 }
                 plugin_secure_memzero(up.password, sizeof(up.password));
                 break;

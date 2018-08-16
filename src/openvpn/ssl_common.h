@@ -384,6 +384,9 @@ struct tls_session
     /* const options and config info */
     struct tls_options *opt;
 
+  /* framed ip (returned from auth-plugin(v2)) */
+  char framedip[52];
+
     /* during hard reset used to control burst retransmit */
     bool burst;
 
