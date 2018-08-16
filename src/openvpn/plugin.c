@@ -801,6 +801,7 @@ plugin_call_ssl(const struct plugin_list *pl,
         bool success = false;
         bool error = false;
         bool deferred = false;
+        bool challenge = false;
 
         setenv_del(es, "script_type");
         envp = make_env_array(es, false, &gc);
@@ -824,6 +825,10 @@ plugin_call_ssl(const struct plugin_list *pl,
 
                 case OPENVPN_PLUGIN_FUNC_DEFERRED:
                     deferred = true;
+                    break;
+
+                case OPENVPN_PLUGIN_FUNC_CHALLENGE:
+                    challenge = true;
                     break;
 
                 default:
@@ -850,6 +855,10 @@ plugin_call_ssl(const struct plugin_list *pl,
         else if (deferred)
         {
             return OPENVPN_PLUGIN_FUNC_DEFERRED;
+        }
+        else if (challenge)
+        {
+            return OPENVPN_PLUGIN_FUNC_CHALLENGE;
         }
     }
 

@@ -148,6 +148,7 @@ typedef void *openvpn_plugin_handle_t;
 #define OPENVPN_PLUGIN_FUNC_SUCCESS  0
 #define OPENVPN_PLUGIN_FUNC_ERROR    1
 #define OPENVPN_PLUGIN_FUNC_DEFERRED 2
+#define OPENVPN_PLUGIN_FUNC_CHALLENGE 3
 
 /*
  * For Windows (needs to be modified for MSVC)
