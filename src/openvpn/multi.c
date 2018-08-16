@@ -1453,6 +1453,18 @@ multi_select_virtual_addr(struct multi_context *m, struct multi_instance *mi)
      * If ifconfig addresses were set by dynamic config file,
      * release pool addresses, otherwise keep them.
      */
+
+  /* XXX XXX XXX */
+  if(*mi->context.c2.tls_multi->session[TM_ACTIVE].framedip){
+    struct in_addr addr_buff;
+    mi->context.options.push_ifconfig_defined=1;
+    mi->context.options.push_ifconfig_local = 
+      getaddr (GETADDR_HOST_ORDER, 
+	  mi->context.c2.tls_multi->session[TM_ACTIVE].framedip, 0, NULL, NULL);
+    mi->context.options.push_ifconfig_remote_netmask = mi->context.c1.tuntap->remote_netmask;
+  }
+  /* XXX XXX XXX */
+
     if (mi->context.options.push_ifconfig_defined)
     {
         /* ifconfig addresses were set statically,

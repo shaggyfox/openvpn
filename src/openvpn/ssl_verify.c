@@ -838,7 +838,7 @@ cleanup:
 
 #ifdef MANAGEMENT_DEF_AUTH
 void
-man_def_auth_set_client_reason(struct tls_multi *multi, const char *client_reason)
+man_def_auth_set_client_reason(struct tls_multi *multi, const char *client_reason, ...)
 {
     if (multi->client_reason)
     {
@@ -848,7 +848,10 @@ man_def_auth_set_client_reason(struct tls_multi *multi, const char *client_reaso
     if (client_reason && strlen(client_reason))
     {
         /* FIXME: Last alloc will never be freed */
-        multi->client_reason = string_alloc(client_reason, NULL);
+        va_list ap;
+        va_start(ap, client_reason);
+        vasprintf(&multi->client_reason, client_reason, ap);
+        va_end(ap);
     }
 }
 
@@ -1166,7 +1169,8 @@ done:
  * Verify the username and password using a plugin
  */
 static int
-verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up, const char *raw_username)
+verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up, const char *raw_username,
+    const char *state_id)
 {
     int retval = OPENVPN_PLUGIN_FUNC_ERROR;
 #ifdef PLUGIN_DEF_AUTH
@@ -1183,6 +1187,9 @@ verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up,
         /* setenv incoming cert common name for script */
         setenv_str(session->opt->es, "common_name", session->common_name);
 
+        /* setenv state_id */
+        setenv_str (session->opt->es, "state_id", state_id);
+
         /* setenv client real IP address */
         setenv_untrusted(session);
 
@@ -1197,7 +1204,25 @@ verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up,
 #endif
 
         /* call command */
-        retval = plugin_call(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, NULL, session->opt->es);
+        plugin_return_init(&pr)
+
+        retval = plugin_call (session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY, NULL, &pr, session->opt->es);
+
+        do{
+ 	    int i;
+            struct openvpn_plugin_string_list* l;
+            for(i=0;i<pr.n;++i){
+                for( l = pr.list[i]; l; l=l->next){
+                    if(!strcmp(l->name,"framedip")){
+                        strncpy(session->framedip,l->value,sizeof(session->framedip));
+                        l=NULL;
+                        break;
+                    }
+                }
+            }
+        }while(0);
+
+        plugin_return_free(&pr);
 
 #ifdef PLUGIN_DEF_AUTH
         /* purge auth control filename (and file itself) for non-deferred returns */
@@ -1237,6 +1262,7 @@ verify_user_pass_management(struct tls_session *session, const struct user_pass 
 {
     int retval = KMDA_ERROR;
     struct key_state *ks = &session->key[KS_PRIMARY];      /* primary key */
+  struct plugin_return pr;
 
     /* Is username defined? */
     if ((session->opt->ssl_flags & SSLF_AUTH_USER_PASS_OPTIONAL) || strlen(up->username))
@@ -1289,6 +1315,7 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
 
 #ifdef MANAGEMENT_DEF_AUTH
     int man_def_auth = KMDA_UNDEF;
+    char state_id[128] = "";
 
     if (management_enable_def_auth(management))
     {
@@ -1377,7 +1404,33 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
 #endif
     if (plugin_defined(session->opt->plugins, OPENVPN_PLUGIN_AUTH_USER_PASS_VERIFY))
     {
-        s1 = verify_user_pass_plugin(session, up, raw_username);
+       if(!strncmp(up->password,"CRV1:",5)){
+	   char new_password[128]="";
+	   char *str;
+	   char *str_ptr=up->password;
+	   printf("-> got '%s'\n",up->password);
+	   /* CRV1  */str=strsep(&str_ptr,":");
+	   /* flags */str=strsep(&str_ptr,":");
+	   if((str=strsep(&str_ptr,":"))){
+	     strcpy(state_id,str);
+	   }
+	   /* user */str=strsep(&str_ptr,":");
+	   if(str_ptr){
+	     strcpy(new_password,str_ptr);
+	   }
+	   strcpy(up->password,new_password);
+	   printf("user: %s\n",up->username);
+	   printf("password: %s\n",up->password);
+	   s1 = verify_user_pass_plugin (session, up, raw_username, state_id);
+       }else{
+	   char *new_state_id=NULL;
+	   char state_id_buff[32];
+	   prng_bytes (state_id_buff, sizeof(state_id_buff));
+	   openvpn_base64_encode(state_id_buff,sizeof(state_id_buff),&new_state_id);
+	   strcpy(state_id,new_state_id);
+	   free(new_state_id);
+	   s1 = verify_user_pass_plugin (session, up, raw_username, state_id);
+       }
     }
     if (session->opt->auth_user_pass_verify_script)
     {
@@ -1459,6 +1512,19 @@ verify_user_pass(struct user_pass *up, struct tls_multi *multi,
     else
     {
         msg(D_TLS_ERRORS, "TLS Auth Error: Auth Username/Password verification failed for peer");
+        /* XXX */
+        fprintf(stderr,"GOT %d AS AUTH-RESULT\n",s1);
+        if(s1 == OPENVPN_PLUGIN_FUNC_CHALLENGE)
+        {
+            char* b64_username=NULL;
+            openvpn_base64_encode(up->username, strlen(up->username), &b64_username);
+            man_def_auth_set_client_reason (multi,
+            "CRV1:R,E:%s:%s:Please enter token PIN",
+            state_id,
+            b64_username);
+            free(b64_username);
+        }
+        /* XXX */
     }
 
 done:

@@ -226,7 +226,7 @@ struct x509_track
 #ifdef MANAGEMENT_DEF_AUTH
 bool tls_authenticate_key(struct tls_multi *multi, const unsigned int mda_key_id, const bool auth, const char *client_reason);
 
-void man_def_auth_set_client_reason(struct tls_multi *multi, const char *client_reason);
+void man_def_auth_set_client_reason(struct tls_multi *multi, const char *client_reason, ...);
 
 #endif
 

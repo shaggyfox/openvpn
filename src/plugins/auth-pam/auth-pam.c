@@ -43,6 +43,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <syslog.h>
@@ -61,6 +62,7 @@
 #define RESPONSE_INIT_FAILED      11
 #define RESPONSE_VERIFY_SUCCEEDED 12
 #define RESPONSE_VERIFY_FAILED    13
+#define RESPONSE_VERIFY_CHALLENGE 14
 
 /* Pointers to functions exported from openvpn */
 static plugin_secure_memzero_t plugin_secure_memzero = NULL;
@@ -113,7 +115,22 @@ struct user_pass {
     char common_name[128];
 
     const struct name_value_list *name_value_list;
+    char state_id[128];
+    char framedip[128];
+    int passwd_cnt;
+    int fd;
 };
+
+struct challenge_list {
+  struct challenge_list *next;
+  char *state_id;
+  char *username;
+  pid_t pid;
+  int fd;
+  time_t timestamp;
+};
+
+static struct challenge_list *challenges = NULL;
 
 /* Background process function */
 static void pam_server(int fd, const char *service, int verb, const struct name_value_list *name_value_list);
@@ -442,7 +459,7 @@ error:
 }
 
 OPENVPN_EXPORT int
-openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const char *argv[], const char *envp[])
+openvpn_plugin_func_v2(openvpn_plugin_handle_t handle, const int type, const char *argv[], const char *envp[], void* per_client_ctx, struct openvpn_plugin_string_list** return_list)
 {
     struct auth_pam_context *context = (struct auth_pam_context *) handle;
 
@@ -452,13 +469,21 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
         const char *username = get_env("username", envp);
         const char *password = get_env("password", envp);
         const char *common_name = get_env("common_name", envp) ? get_env("common_name", envp) : "";
+        const char *state_id = get_env("state_id", envp);
+        char framedip[128];
+
+        if (!state_id)
+        {
+          state_id = "";
+        }
 
         if (username && strlen(username) > 0 && password)
         {
             if (send_control(context->foreground_fd, COMMAND_VERIFY) == -1
                 || send_string(context->foreground_fd, username) == -1
                 || send_string(context->foreground_fd, password) == -1
-                || send_string(context->foreground_fd, common_name) == -1)
+                || send_string(context->foreground_fd, common_name) == -1
+                || send_string(context->foreground_fd, state_id) == -1)
             {
                 fprintf(stderr, "AUTH-PAM: Error sending auth info to background process\n");
             }
@@ -467,7 +492,19 @@ openvpn_plugin_func_v1(openvpn_plugin_handle_t handle, const int type, const cha
                 const int status = recv_control(context->foreground_fd);
                 if (status == RESPONSE_VERIFY_SUCCEEDED)
                 {
+                    /* may receive FramedIP */
+		    recv_string(context->foreground_fd,framedip,sizeof(framedip));
+		    if(*framedip){
+		        (*return_list) = calloc(1,sizeof(**return_list));
+		        (*return_list)->name = strdup("framedip");
+		        (*return_list)->value = strdup(framedip);
+		    }
                     return OPENVPN_PLUGIN_FUNC_SUCCESS;
+
+                }
+                if (status == RESPONSE_VERIFY_CHALLENGE)
+                {
+                    return OPENVPN_PLUGIN_FUNC_CHALLENGE;
                 }
                 if (status == -1)
                 {
@@ -531,10 +568,11 @@ static int
 my_conv(int n, const struct pam_message **msg_array,
         struct pam_response **response_array, void *appdata_ptr)
 {
-    const struct user_pass *up = ( const struct user_pass *) appdata_ptr;
+    struct user_pass *up = ( struct user_pass *) appdata_ptr;
     struct pam_response *aresp;
     int i;
     int ret = PAM_SUCCESS;
+    char challenge_buffer[256];
 
     *response_array = NULL;
 
@@ -623,15 +661,43 @@ my_conv(int n, const struct pam_message **msg_array,
             switch (msg->msg_style)
             {
                 case PAM_PROMPT_ECHO_OFF:
-                    aresp[i].resp = strdup(up->password);
-                    if (aresp[i].resp == NULL)
+                    if (up->passwd_cnt++)
                     {
-                        ret = PAM_CONV_ERR;
+                      /* second time = challenge */
+                      if (-1 == send_control(up->fd, RESPONSE_VERIFY_CHALLENGE))
+                      {
+                        /* */
+                      } else if (-1 == recv_string(up->fd, challenge_buff, sizeof(challenge_buff)))
+                      {
+                        fprintf(stderr, "AUTH-PAM: BACKGROUND: recv challenge failed\n");
+                      } else if (strlen(challenge_buff)){
+                        aresp[i].resp = strdup(challenge_buff);
+                      }
+                    } else
+                    {
+                      aresp[i].resp = strdup(up->password);
+                      if (aresp[i].resp == NULL)
+                      {
+                          ret = PAM_CONV_ERR;
+                      }
                     }
                     break;
 
                 case PAM_PROMPT_ECHO_ON:
-                    aresp[i].resp = strdup(up->username);
+                    if ( -1 == send_control(up->fd, RESPONSE_VERIFY_CHALLENGE))
+                    {
+                      /* */
+                    } else if (-1 == recv_string(up->fd, challenge_buff, sizeof(challenge_buff)))
+                    {
+                      /* */
+                    } else if (!strlen(challenge_buff))
+                    {
+                      /* */
+                    } else
+                    {
+                      aresp[i].resp = strdup(challenge_buff);
+                    }
+                    //aresp[i].resp = strdup(up->username);
                     if (aresp[i].resp == NULL)
                     {
                         ret = PAM_CONV_ERR;
@@ -639,9 +705,14 @@ my_conv(int n, const struct pam_message **msg_array,
                     break;
 
                 case PAM_ERROR_MSG:
+	      break;
+	    
                 case PAM_TEXT_INFO:
+	      /* check if value is an IP(v4) addr XXX */
+	      /* if so ... set return value */
+	      strncpy(up->framedip,msg->msg,sizeof(up->framedip)-1);
                     break;
-
+	    
                 default:
                     ret = PAM_CONV_ERR;
                     break;
@@ -661,18 +732,13 @@ my_conv(int n, const struct pam_message **msg_array,
     return ret;
 }
 
-/*
- * Return 1 if authenticated and 0 if failed.
- * Called once for every username/password
- * to be authenticated.
- */
-static int
-pam_auth(const char *service, const struct user_pass *up)
+static void
+pam_auth_bg(const char *service, const struct user_pass *up)
 {
     struct pam_conv conv;
     pam_handle_t *pamh = NULL;
     int status = PAM_SUCCESS;
-    int ret = 0;
+    int ret = RESPONSE_VERIFY_FAILED;
     const int name_value_list_provided = (up->name_value_list && up->name_value_list->len > 0);
 
     /* Initialize PAM */
@@ -689,11 +755,11 @@ pam_auth(const char *service, const struct user_pass *up)
         }
         if (status == PAM_SUCCESS)
         {
-            ret = 1;
+            ret = RESPONSE_VERIFY_SUCCEEDED;
         }
 
         /* Output error message if failed */
-        if (!ret)
+        if (ret == RESPONSE_VERIFY_FAILED)
         {
             fprintf(stderr, "AUTH-PAM: BACKGROUND: user '%s' failed to authenticate: %s\n",
                     up->username,
@@ -703,7 +769,126 @@ pam_auth(const char *service, const struct user_pass *up)
         /* Close PAM */
         pam_end(pamh, status);
     }
+    send_control(up->fd, ret);
+    if(ret == RESPONSE_VERIFY_SUCCEEDED){
+        /* append (optional) framedip */
+        send_string(up->fd,up->framedip);
+    }
+}
 
+/*
+ * Return 1 if authenticated and 0 if failed.
+ * Called once for every username/password
+ * to be authenticated.
+ */
+static int pam_auth(const char* service, struct user_pass* up)
+{
+    pid_t pid;
+    int fds[2];
+    int my_fd;
+    int status;
+    int ret=0;
+    time_t now=time(NULL);
+    struct challenge_list **my_challenge_ptr;
+    struct challenge_list *my_challenge;
+
+    /* remove old stuff */
+    my_challenge_ptr=&challenges;
+    while(*my_challenge_ptr)
+      {
+        if(now - (*my_challenge_ptr)->timestamp > 120)
+          {
+            send_string((*my_challenge_ptr)->fd,"");
+            recv_control((*my_challenge_ptr)->fd);
+            close((*my_challenge_ptr)->fd);
+            fprintf(stderr,"AUTH-PAM: BACKGROUND: waitpid() ...\n");
+            waitpid((*my_challenge_ptr)->pid,&status,0);
+            fprintf(stderr,"AUTH-PAM: BACKGROUND: waitpid() OK\n");
+            free((*my_challenge_ptr)->username);
+            free((*my_challenge_ptr)->state_id);
+            my_challenge=(*my_challenge_ptr);
+            (*my_challenge_ptr)=my_challenge->next;
+            free(my_challenge);
+          }
+        else
+          {
+            my_challenge_ptr=&(*my_challenge_ptr)->next;
+          }
+      }
+
+    /* try to find state_id in challenge - list */
+    my_challenge_ptr=&challenges;
+    while(*my_challenge_ptr)
+      {
+        if(!strcmp((*my_challenge_ptr)->state_id,up->state_id)
+            && !strcmp((*my_challenge_ptr)->username,up->username))
+        {
+          break;
+        }
+        my_challenge_ptr=&(*my_challenge_ptr)->next;
+      }
+
+    if(!(*my_challenge_ptr))
+      {
+        if (socketpair (PF_UNIX, SOCK_DGRAM, 0, fds) == -1)
+          {
+            return RESPONSE_VERIFY_FAILED;
+          }
+        up->fd = fds[0];
+        my_fd  = fds[1];
+        fcntl (fds[1], F_SETFD, FD_CLOEXEC);
+        if(!(pid = fork()))
+          {
+            pam_auth_bg(service,up);
+            close(up->fd);
+            exit(0);
+          }
+        close(up->fd);
+      }
+    else
+      {
+        /* fill out fd and pid ... */
+        my_fd=(*my_challenge_ptr)->fd;
+        pid=(*my_challenge_ptr)->pid;
+        /* ... send challenge response */
+        send_string(my_fd,up->password); /* XXX check for error */
+        /* and remove challenge-list entry */
+        free((*my_challenge_ptr)->state_id);
+        free((*my_challenge_ptr)->username);
+        my_challenge=(*my_challenge_ptr);
+        (*my_challenge_ptr)=my_challenge->next;
+        free(my_challenge);
+      }
+    switch((ret=recv_control(my_fd)))
+      {
+        case RESPONSE_VERIFY_FAILED:
+        case RESPONSE_VERIFY_SUCCEEDED:
+          fprintf(stderr,"AUTH-PAM: BACKGROUND: received auth result\n");
+	if(ret == RESPONSE_VERIFY_SUCCEEDED){
+	  /* read 'optional' ip-addr from background process */
+	  recv_string(my_fd,up->framedip,sizeof(up->framedip));
+	}
+          close(my_fd);
+          waitpid(pid,&status,0);
+          break;
+        case RESPONSE_VERIFY_CHALLENGE:
+          fprintf(stderr,"AUTH-PAM: BACKGROUND: received challenge request\n");
+          my_challenge=calloc(1,sizeof(struct challenge_list));
+          my_challenge->pid=pid;
+          my_challenge->state_id=strdup(up->state_id);
+          my_challenge->username=strdup(up->username);
+          my_challenge->fd=my_fd;
+          my_challenge->timestamp=time(NULL);
+          my_challenge->next=challenges;
+          challenges=my_challenge;
+          break;
+        default:
+          fprintf(stderr,"AUTH-PAM: BACKEND: unknown\n");
+          close(my_fd);
+          waitpid(pid,&status,0);
+          ret=RESPONSE_VERIFY_FAILED;
+          break;
+      }
     return ret;
 }
 
@@ -753,6 +938,7 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
      */
     while (1)
     {
+        int auth_result;
         memset(&up, 0, sizeof(up));
         up.verb = verb;
         up.name_value_list = name_value_list;
@@ -771,6 +957,7 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
                 if (recv_string(fd, up.username, sizeof(up.username)) == -1
                     || recv_string(fd, up.password, sizeof(up.password)) == -1
                     || recv_string(fd, up.common_name, sizeof(up.common_name)) == -1)
+                    || recv_string(fd, up.state_id, sizeof(up.state_id)) == -1
                 {
                     fprintf(stderr, "AUTH-PAM: BACKGROUND: read error on command channel: code=%d, exiting\n",
                             command);
@@ -787,21 +974,13 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
 #endif
                 }
 
-                if (pam_auth(service, &up)) /* Succeeded */
+                if (send_control (fd, (auth_result = pam_auth(service, &up))) == -1)
                 {
-                    if (send_control(fd, RESPONSE_VERIFY_SUCCEEDED) == -1)
-                    {
-                        fprintf(stderr, "AUTH-PAM: BACKGROUND: write error on response socket [2]\n");
-                        goto done;
-                    }
+                  fprintf(stderr, "AUTH-PAM: BACKGROUND: write error on response socket\n");
                 }
-                else /* Failed */
-                {
-                    if (send_control(fd, RESPONSE_VERIFY_FAILED) == -1)
-                    {
-                        fprintf(stderr, "AUTH-PAM: BACKGROUND: write error on response socket [3]\n");
-                        goto done;
-                    }
+                /* check for result ... if success send also up->framedip */
+                if(auth_result == RESPONSE_VERIFY_SUCCEEDED){
+                    send_string(fd,up.framedip);
                 }
                 plugin_secure_memzero(up.password, sizeof(up.password));
                 break;
