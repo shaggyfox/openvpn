@@ -1455,13 +1455,31 @@ multi_select_virtual_addr(struct multi_context *m, struct multi_instance *mi)
      */
 
   /* XXX XXX XXX */
-  if(*mi->context.c2.tls_multi->session[TM_ACTIVE].framedip){
+  if (*mi->context.c2.tls_multi->session[TM_ACTIVE].framedip)
+  {
     struct in_addr addr_buff;
     mi->context.options.push_ifconfig_defined=1;
-    mi->context.options.push_ifconfig_local = 
-      getaddr (GETADDR_HOST_ORDER, 
+    mi->context.options.push_ifconfig_local =
+      getaddr (GETADDR_HOST_ORDER,
 	  mi->context.c2.tls_multi->session[TM_ACTIVE].framedip, 0, NULL, NULL);
     mi->context.options.push_ifconfig_remote_netmask = mi->context.c1.tuntap->remote_netmask;
+  }
+  if (*mi->context.c2.tls_multi->session[TM_ACTIVE].framedipv6)
+  {
+    struct addrinfo *res = NULL;
+    openvpn_getaddrinfo(GETADDR_PASSIVE,
+        mi->context.c2.tls_multi->session[TM_ACTIVE].framedipv6,
+        "80", 1, NULL, AF_INET6, &res);
+    if (res) {
+      mi->context.options.push_ifconfig_ipv6_defined = 1;
+      mi->context.options.push_ifconfig_ipv6_local = ((struct sockaddr_in6*)res->ai_addr)->sin6_addr;
+      mi->context.options.push_ifconfig_ipv6_remote = mi->context.c1.tuntap->local_ipv6;
+      mi->context.options.ifconfig_ipv6_netbits = 64; /* XXX ??? XXX */
+
+      freeaddrinfo(res);
+    }
+
+
   }
   /* XXX XXX XXX */
 

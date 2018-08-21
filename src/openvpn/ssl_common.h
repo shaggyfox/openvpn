@@ -388,6 +388,7 @@ struct tls_session
 
   /* framed ip (returned from auth-plugin(v2)) */
   char framedip[52];
+  char framedipv6[64];
 
     /* during hard reset used to control burst retransmit */
     bool burst;

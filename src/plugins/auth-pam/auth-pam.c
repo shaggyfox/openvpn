@@ -117,6 +117,7 @@ struct user_pass {
     const struct name_value_list *name_value_list;
     char state_id[128];
     char framedip[128];
+    char framedipv6[128];
     int passwd_cnt;
     int fd;
 };
@@ -493,14 +494,23 @@ openvpn_plugin_func_v2(openvpn_plugin_handle_t handle, const int type, const cha
                 if (status == RESPONSE_VERIFY_SUCCEEDED)
                 {
                     /* may receive FramedIP */
+                    memset(framedip, 0, sizeof(framedip));
 		    recv_string(context->foreground_fd,framedip,sizeof(framedip));
 		    if(*framedip){
 		        (*return_list) = calloc(1,sizeof(**return_list));
 		        (*return_list)->name = strdup("framedip");
 		        (*return_list)->value = strdup(framedip);
+                        return_list = &(*return_list)->next;
 		    }
+                    memset(framedip, 0, sizeof(framedip));
+                    /* recv ipv6 framed ip (optional) */
+                    recv_string(context->foreground_fd,framedip,sizeof(framedip));
+                    if (*framedip) {
+                        (*return_list) = calloc(1, sizeof(**return_list));
+                        (*return_list)->name = strdup("framedipv6");
+                        (*return_list)->value = strdup(framedip);
+                    }
                     return OPENVPN_PLUGIN_FUNC_SUCCESS;
-
                 }
                 if (status == RESPONSE_VERIFY_CHALLENGE)
                 {
@@ -561,6 +571,20 @@ openvpn_plugin_abort_v1(openvpn_plugin_handle_t handle)
     }
 }
 
+#include <netdb.h>
+
+static int get_addr_family(const char *addr_string)
+{
+    struct addrinfo *info = NULL;
+    int ret = -1;
+
+    if (!getaddrinfo(addr_string, "telnet", NULL, &info)) {
+      ret = info->ai_family;
+      freeaddrinfo(info);
+    }
+    return ret;
+}
+
 /*
  * PAM conversation function
  */
@@ -572,7 +596,7 @@ my_conv(int n, const struct pam_message **msg_array,
     struct pam_response *aresp;
     int i;
     int ret = PAM_SUCCESS;
-    char challenge_buffer[256];
+    char challenge_buff[256];
 
     *response_array = NULL;
 
@@ -706,13 +730,19 @@ my_conv(int n, const struct pam_message **msg_array,
 
                 case PAM_ERROR_MSG:
 	      break;
-	    
                 case PAM_TEXT_INFO:
-	      /* check if value is an IP(v4) addr XXX */
-	      /* if so ... set return value */
-	      strncpy(up->framedip,msg->msg,sizeof(up->framedip)-1);
-                    break;
-	    
+                    /* handle text-info only if it's an ip(v6)address */
+                    switch (get_addr_family(msg->msg)) {
+                      case AF_INET:
+                        strncpy(up->framedip, msg->msg, sizeof(up->framedip) - 1);
+                        break;
+                      case AF_INET6:
+                        strncpy(up->framedipv6, msg->msg, sizeof(up->framedipv6) - 1);
+                        break;
+                      default:
+                        break;
+                    }
+                break;
                 default:
                     ret = PAM_CONV_ERR;
                     break;
@@ -773,6 +803,8 @@ pam_auth_bg(const char *service, const struct user_pass *up)
     if(ret == RESPONSE_VERIFY_SUCCEEDED){
         /* append (optional) framedip */
         send_string(up->fd,up->framedip);
+        /* ... and (optional) ipv6 */
+        send_string(up->fd,up->framedipv6);
     }
 }
 
@@ -864,10 +896,12 @@ static int pam_auth(const char* service, struct user_pass* up)
         case RESPONSE_VERIFY_FAILED:
         case RESPONSE_VERIFY_SUCCEEDED:
           fprintf(stderr,"AUTH-PAM: BACKGROUND: received auth result\n");
-	if(ret == RESPONSE_VERIFY_SUCCEEDED){
-	  /* read 'optional' ip-addr from background process */
-	  recv_string(my_fd,up->framedip,sizeof(up->framedip));
-	}
+          if(ret == RESPONSE_VERIFY_SUCCEEDED){
+              /* read 'optional' ip-addr from background process */
+              recv_string(my_fd, up->framedip,sizeof(up->framedip));
+              /* read 'optionnal' ipv6-addr from background process */
+              recv_string(my_fd, up->framedipv6, sizeof(up->framedipv6));
+          }
           close(my_fd);
           waitpid(pid,&status,0);
           break;
@@ -956,8 +990,8 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
             case COMMAND_VERIFY:
                 if (recv_string(fd, up.username, sizeof(up.username)) == -1
                     || recv_string(fd, up.password, sizeof(up.password)) == -1
-                    || recv_string(fd, up.common_name, sizeof(up.common_name)) == -1)
-                    || recv_string(fd, up.state_id, sizeof(up.state_id)) == -1
+                    || recv_string(fd, up.common_name, sizeof(up.common_name)) == -1
+                    || recv_string(fd, up.state_id, sizeof(up.state_id)) == -1)
                 {
                     fprintf(stderr, "AUTH-PAM: BACKGROUND: read error on command channel: code=%d, exiting\n",
                             command);
