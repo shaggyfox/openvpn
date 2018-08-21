@@ -1216,8 +1216,8 @@ verify_user_pass_plugin(struct tls_session *session, const struct user_pass *up,
                 for( l = pr.list[i]; l; l=l->next){
                     if(!strcmp(l->name,"framedip")){
                         strncpy(session->framedip,l->value,sizeof(session->framedip));
-                        l=NULL;
-                        break;
+                    } else if(!strcmp(l->name, "framedipv6")) {
+                        strncpy(session->framedipv6, l->value, sizeof(session->framedipv6));
                     }
                 }
             }

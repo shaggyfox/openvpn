@@ -1015,6 +1015,7 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
                 /* check for result ... if success send also up->framedip */
                 if(auth_result == RESPONSE_VERIFY_SUCCEEDED){
                     send_string(fd,up.framedip);
+                    send_string(fd,up.framedipv6);
                 }
                 plugin_secure_memzero(up.password, sizeof(up.password));
                 break;
