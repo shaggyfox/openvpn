@@ -770,7 +770,7 @@ my_conv(int n, const struct pam_message **msg_array,
  * to be authenticated.
  */
 static int
-pam_auth(const char *service, const struct user_pass *up)
+pam_auth(const char *service, const struct user_pass *up, char **framed_ip, char **framed_ipv6)
 {
     struct pam_conv conv;
     pam_handle_t *pamh = NULL;
@@ -801,6 +801,14 @@ pam_auth(const char *service, const struct user_pass *up)
             plugin_log(PLOG_ERR, MODULE, "BACKGROUND: user '%s' failed to authenticate: %s",
                     up->username,
                     pam_strerror(pamh, status));
+        } else {
+          const char *ip;
+          if (framed_ip && (ip = pam_getenv(pamh, "framed-ip-address"))) {
+            *framed_ip = strdup(ip);
+          }
+          if (framed_ipv6 && (ip = pam_getenv(pamh, "framed-ipv6-address"))) {
+            *framed_ipv6 = strdup(ip);
+          }
         }
 
         /* Close PAM */
@@ -871,13 +879,22 @@ do_deferred_pam_auth(int fd, const char *ac_file_name,
                    ac_file_name );
         exit(1);
     }
-    int pam_success = pam_auth(service, up);
+    char *framed_ip = NULL;
+    char *framed_ipv6 = NULL;
+    int pam_success = pam_auth(service, up, &framed_ip, &framed_ipv6);
+    if (pam_success) {
+      dprintf(ac_fd, "x%s\n", framed_ip ? framed_ip : "");
+      dprintf(ac_fd, "%s\n", framed_ipv6 ? framed_ipv6 : "");
+    }
+    lseek(ac_fd, 0, SEEK_SET);
 
     if (write( ac_fd, pam_success ? "1" : "0", 1 ) != 1)
     {
         plugin_log(PLOG_ERR|PLOG_ERRNO, MODULE, "cannot write to '%s'",
                    ac_file_name );
     }
+    free(framed_ip);
+    free(framed_ipv6);
     close(ac_fd);
     plugin_log(PLOG_NOTE, MODULE, "BACKGROUND: %s: deferred auth: PAM %s",
                up->username, pam_success ? "succeeded" : "rejected" );
@@ -983,7 +1000,7 @@ pam_server(int fd, const char *service, int verb, const struct name_value_list *
                 /* non-deferred auth: wait for pam result and send
                  * result back via control socketpair
                  */
-                if (pam_auth(service, &up)) /* Succeeded */
+                if (pam_auth(service, &up, NULL, NULL)) /* Succeeded */
                 {
                     if (send_control(fd, RESPONSE_VERIFY_SUCCEEDED) == -1)
                     {

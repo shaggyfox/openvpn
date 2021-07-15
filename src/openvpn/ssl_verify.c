@@ -876,7 +876,7 @@ key_state_gen_auth_control_file(struct key_state *ks, const struct tls_options *
 }
 
 static unsigned int
-key_state_test_auth_control_file(struct key_state *ks)
+key_state_test_auth_control_file(struct key_state *ks, char **framed_ip, char **framed_ipv6)
 {
     if (ks && ks->auth_control_file)
     {
@@ -890,6 +890,26 @@ key_state_test_auth_control_file(struct key_state *ks)
                 if (c == '1')
                 {
                     ret = ACF_SUCCEEDED;
+                    char ip[64];
+                    char *r = NULL;
+                    memset(ip, 0, sizeof(ip));
+                    if (fgets(ip, sizeof(ip), fp)) {
+                      if ((r = strchr(ip, '\n'))) {
+                        *r = '\0';
+                      }
+                      if (*ip) {
+                        *framed_ip = strdup(ip);
+                      }
+                    }
+                    memset(ip, 0, sizeof(ip));
+                    if (fgets(ip, sizeof(ip), fp)) {
+                      if ((r = strchr(ip, '\n'))) {
+                        *r = '\0';
+                      }
+                      if (*ip) {
+                        *framed_ipv6 = strdup(ip);
+                      }
+                    }
                 }
                 else if (c == '0')
                 {
@@ -997,7 +1017,9 @@ tls_authentication_status(struct tls_multi *multi, const int latency)
                     unsigned int s1 = ACF_DISABLED;
                     unsigned int s2 = ACF_DISABLED;
 #ifdef PLUGIN_DEF_AUTH
-                    s1 = key_state_test_auth_control_file(ks);
+                    char *framed_ip = NULL;
+                    char *framed_ipv6 = NULL;
+                    s1 = key_state_test_auth_control_file(ks, &framed_ip, &framed_ipv6);
 #endif /* PLUGIN_DEF_AUTH */
 #ifdef MANAGEMENT_DEF_AUTH
                     s2 = man_def_auth_test(ks);
@@ -1013,6 +1035,11 @@ tls_authentication_status(struct tls_multi *multi, const int latency)
                             {
                                 ssl_session_fully_authenticated(multi,
                                                                 &multi->session[TM_ACTIVE]);
+                                if (framed_ip) {
+                                  strncpy(multi->session[TM_ACTIVE].framed_ip,
+                                      framed_ip,
+                                      sizeof(multi->session[TM_ACTIVE].framed_ip));
+                                }
                             }
                             ks->authenticated = KS_AUTH_TRUE;
                             break;

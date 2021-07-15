@@ -1440,6 +1440,31 @@ multi_select_virtual_addr(struct multi_context *m, struct multi_instance *mi)
 {
     struct gc_arena gc = gc_new();
 
+    if (*mi->context.c2.tls_multi->session[TM_ACTIVE].framed_ip)
+    {
+      mi->context.options.push_ifconfig_defined=1;
+      mi->context.options.push_ifconfig_local =
+        getaddr (GETADDR_HOST_ORDER,
+           mi->context.c2.tls_multi->session[TM_ACTIVE].framed_ip, 0, NULL, NULL);
+      mi->context.options.push_ifconfig_remote_netmask = mi->context.c1.tuntap->remote_netmask;
+    }
+    if (*mi->context.c2.tls_multi->session[TM_ACTIVE].framed_ipv6)
+    {
+      struct addrinfo *res = NULL;
+      openvpn_getaddrinfo(GETADDR_PASSIVE,
+          mi->context.c2.tls_multi->session[TM_ACTIVE].framed_ipv6,
+          "80", 1, NULL, AF_INET6, &res);
+      if (res) {
+        mi->context.options.push_ifconfig_ipv6_defined = 1;
+        mi->context.options.ifconfig_ipv6_pool_defined = 0; /* disable ipv6-pool here */
+        mi->context.options.push_ifconfig_ipv6_local = ((struct sockaddr_in6*)res->ai_addr)->sin6_addr;
+        mi->context.options.push_ifconfig_ipv6_remote = mi->context.c1.tuntap->local_ipv6;
+        mi->context.options.push_ifconfig_ipv6_netbits = mi->context.c1.tuntap->netbits_ipv6;
+
+        freeaddrinfo(res);
+      }
+    }
+
     /*
      * If ifconfig addresses were set by dynamic config file,
      * release pool addresses, otherwise keep them.

@@ -440,6 +440,8 @@ struct tls_session
     struct link_socket_actual untrusted_addr;
 
     struct key_state key[KS_SIZE];
+    char framed_ip[64];
+    char framed_ipv6[64];
 };
 
 /** @addtogroup control_processor
